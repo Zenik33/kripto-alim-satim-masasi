@@ -5,7 +5,7 @@ import urllib.request
 import urllib.parse
 from datetime import datetime, timezone
 
-BASE_URL = "https://api.binance.com"
+BASE_URL = "https://data-api.binance.vision"
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 THRESHOLD = 2.0
 
