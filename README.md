@@ -1,0 +1,1 @@
+# kripto-alim-satim-masasi
