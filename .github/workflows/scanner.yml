@@ -1,17 +1,18 @@
-
-
 name: Kripto Tarayici
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/15 * * * *"
-env:
-TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+    - cron: "0 */4 * * *"
+
 jobs:
   scan:
     runs-on: ubuntu-latest
+
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
     steps:
       - name: Kodu indir
         uses: actions/checkout@v4
@@ -19,7 +20,7 @@ jobs:
       - name: Python kur
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.11"
 
-      - name: Tarama yap
+      - name: Tarayıcıyı çalıştır
         run: python scanner.py
