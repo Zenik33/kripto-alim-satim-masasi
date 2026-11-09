@@ -31,6 +31,13 @@ MAX_WORKERS = 8
 
 STATE_FILE = "paper_state.json"
 
+# Sabit değerli coinler yeni sanal alıma kapalı.
+STABLECOINS = {
+    "USDC", "USDT", "BUSD", "TUSD", "FDUSD", "USDP",
+    "DAI", "USDE", "USDS", "RLUSD", "PYUSD", "EURC",
+    "USDD", "FRAX", "USTC", "UST", "EURS", "AEUR"
+}
+
 
 # =====================================================
 # GENEL YARDIMCILAR
@@ -46,6 +53,22 @@ def stamp(value=None):
 
 def money(value):
     return f"{value:.2f} TL"
+
+
+def price_money(value):
+    """Düşük fiyatlı coinlerde sıfır görünmesini önler."""
+    value = float(value)
+
+    if value == 0:
+        return "0 TL"
+
+    decimals = 2 if abs(value) >= 100 else (
+        4 if abs(value) >= 1 else (
+            6 if abs(value) >= 0.01 else 10
+        )
+    )
+
+    return f"{value:.{decimals}f} TL"
 
 
 def get_json(url, timeout=12):
@@ -196,8 +219,8 @@ def rsi(values, period=14):
 
 def analyze(candles):
 
-    # Haftalık analiz için 30 mum yeterli.
-    if len(candles) < 30:
+    # EMA50 için en az 50 mum gerekir.
+    if len(candles) < 50:
         return None
 
     closes = [x["close"] for x in candles]
@@ -368,6 +391,7 @@ def binance_data():
         if item.get("status") == "TRADING"
         and item.get("quoteAsset") in ("USDT", "TRY")
         and item.get("isSpotTradingAllowed", False)
+        and item.get("baseAsset") not in STABLECOINS
     }
 
     prices = {}
@@ -432,7 +456,7 @@ def binance_candles(symbol):
         BINANCE
         + "/api/v3/klines"
         + f"?symbol={urllib.parse.quote(symbol)}"
-        + "&interval=1d&limit=400"
+        + "&interval=1d&limit=1000"
     )
 
     data = get_json(url)
@@ -491,11 +515,12 @@ def evaluate(
     if not day or not week:
         return None
 
+    # AL için günlük VE haftalık puanlar
+    # ayrı ayrı en az %80 olmalı.
     buy_alert = (
         day["decision"] == "AL"
         and day["buy"] >= BUY_LIMIT
-    ) or (
-        week["decision"] == "AL"
+        and week["decision"] == "AL"
         and week["buy"] >= BUY_LIMIT
     )
 
@@ -611,6 +636,15 @@ def paper_update(state, market):
         if name in state["positions"]:
             continue
 
+        # Sabit değerli coinleri alma.
+        base_asset = name[:-4] if name.endswith("USDT") else (
+            name[:-3] if name.endswith("TRY") else name
+        )
+
+        if base_asset in STABLECOINS:
+            continue
+
+        # Günlük VE haftalık AL şartı zorunlu.
         if not item["buy_alert"]:
             continue
 
@@ -644,7 +678,7 @@ def paper_update(state, market):
 
         events.append(
             f"🟢 SANAL ALIM: {name}\n"
-            f"Alış: {money(price)}\n"
+            f"Alış: {price_money(price)}\n"
             f"Yatırılan: {money(allocation)}\n"
             f"Günlük AL: %{item['daily']['buy']}\n"
             f"Haftalık AL: %{item['weekly']['buy']}"
@@ -745,7 +779,7 @@ def send_alerts(state, market):
 
     for name, item in market.items():
 
-        # Yalnızca güçlü AL sinyallerini bildir.
+        # Yalnızca günlük ve haftalık güçlü AL sinyalleri.
         if not item["buy_alert"]:
             continue
 
@@ -775,7 +809,7 @@ def send_alerts(state, market):
             f"| AL %{item['daily']['buy']}\n"
             f"Haftalık: {item['weekly']['decision']} "
             f"| AL %{item['weekly']['buy']}\n"
-            f"Güncel fiyat: {money(item['price'])}\n"
+            f"Güncel fiyat: {price_money(item['price'])}\n"
             "Sinyal puanı kazanç olasılığı değildir."
         )
 
