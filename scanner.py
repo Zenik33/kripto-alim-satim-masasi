@@ -5,173 +5,110 @@ import time
 import urllib.request
 import urllib.parse
 import urllib.error
-import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 
 # =========================================================
 # AYARLAR
 # =========================================================
 
-BINANCE_URL = "https://data-api.binance.vision"
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-QUOTE_ASSETS = {"USDT", "TRY"}
-MIN_SIGNAL_STRENGTH = 65
+BINANCE = "https://data-api.binance.vision"
+YAHOO = "https://query1.finance.yahoo.com/v8/finance/chart/"
+
+BUY_LIMIT = 80
+SELL_LIMIT = 80
+
+MAX_USDT_PAIRS = 120
 REQUEST_DELAY = 0.15
 
-# 9 Kasım 2026 itibarıyla BIST 100 listesi.
-# Endeks bileşenleri değişebileceğinden liste dönemsel güncellenmelidir.
-BIST100 = """
-AEFES AGHOL AHGAZ AKBNK AKCNS AKFYE AKSA AKSEN
-ALARK ALBRK ALTNY ANHYT ANSGR ARCLK ASTOR AYGAZ
-BIMAS BINHO BERA BRYAT BRSAN BTCIM CCOLA CANTE
-CIMSA CWENE DOAS DOHOL ECILC ECZYT EGEEN EGGUB
-EKGYO ENERY ENJSA ENKAI ENTRA EREGL FENER FROTO
-GARAN GLRMK GLYHO GRSEL GUBRF GWIND HALKB HEKTS
-ISCTR ISDMR ISMEN KARSN KATMR KCAER KCHOL KORDS
-KRDMD KRVGD LMKDC MAVI MGROS MPARK ODAS OTKAR
-OYAKC PAHOL PETKM PGSUS SAHOL SASA SISE SNGYO
-SOKM TABGD TAVHL TCELL THYAO TKFEN TOASO TSKB
-TTKOM TTRAK TUKAS TUPRS TURSG TRENJ TRALT TRGYO
-TRMET ULKER VAKBN VESTL YKBNK ZOREN
-""".split()
+# BIST 100 için başlangıç sembol listesi.
+# Endeks üyelikleri zamanla değişebilir.
+BIST_SYMBOLS = [
+    "AEFES", "AGHOL", "AKBNK", "AKSA", "AKSEN",
+    "ALARK", "ARCLK", "ASELS", "ASTOR", "BIMAS",
+    "BRSAN", "BRYAT", "CCOLA", "CIMSA", "DOAS",
+    "DOHOL", "EGEEN", "EKGYO", "ENJSA", "ENKAI",
+    "EREGL", "FROTO", "GARAN", "GESAN", "GUBRF",
+    "HALKB", "HEKTS", "ISCTR", "ISGYO", "ISMEN",
+    "KCHOL", "KONTR", "KORDS", "KOZAA", "KOZAL",
+    "KRDMD", "MGROS", "MIATK", "ODAS", "OTKAR",
+    "OYAKC", "PETKM", "PGSUS", "SAHOL", "SASA",
+    "SISE", "SKBNK", "SOKM", "TAVHL", "TCELL",
+    "THYAO", "TKFEN", "TOASO", "TSKB", "TTKOM",
+    "TTRAK", "TUPRS", "ULKER", "VAKBN", "VESTL",
+    "YKBNK", "ZOREN"
+]
 
 # =========================================================
-# HTTP YARDIMCILARI
+# HTTP İŞLEMLERİ
 # =========================================================
 
-def get_json(url, retries=3):
-    for attempt in range(retries):
+def get_json(url):
+    headers = {
+        "User-Agent": "Mozilla/5.0 KriptoTarayici/1.0"
+    }
+
+    request = urllib.request.Request(url, headers=headers)
+
+    for attempt in range(3):
         try:
-            req = urllib.request.Request(
-                url,
-                headers={"User-Agent": "Mozilla/5.0"}
-            )
-            with urllib.request.urlopen(req, timeout=20) as response:
+            with urllib.request.urlopen(request, timeout=20) as response:
                 return json.loads(response.read().decode("utf-8"))
-        except Exception as exc:
-            if attempt == retries - 1:
-                raise exc
+        except Exception as error:
+            print("Veri alma hatası:", error)
             time.sleep(2 * (attempt + 1))
 
+    return None
 
-def get_text(url):
-    req = urllib.request.Request(
-        url,
-        headers={"User-Agent": "Mozilla/5.0"}
+
+def send_telegram(message):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("Telegram bilgileri bulunamadı.")
+        return
+
+    url = (
+        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     )
-    with urllib.request.urlopen(req, timeout=20) as response:
-        return response.read().decode("utf-8", errors="replace")
+
+    data = urllib.parse.urlencode({
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message,
+        "disable_web_page_preview": "true"
+    }).encode()
+
+    request = urllib.request.Request(url, data=data)
+
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            print("Telegram gönderildi:", response.status)
+    except Exception as error:
+        print("Telegram gönderim hatası:", error)
 
 
 # =========================================================
-# HABER ANALİZİ
-# =========================================================
-
-POSITIVE_WORDS = [
-    "surge", "rally", "approval", "approved", "adoption",
-    "inflow", "record high", "partnership", "bullish",
-    "yükseliş", "onay", "rekor", "anlaşma", "yatırım",
-    "güçlü", "olumlu", "sermaye girişi"
-]
-
-NEGATIVE_WORDS = [
-    "crash", "hack", "lawsuit", "ban", "investigation",
-    "outflow", "bearish", "fraud", "liquidation",
-    "düşüş", "yasak", "soruşturma", "hack", "dolandırıcılık",
-    "iflas", "olumsuz", "sermaye çıkışı"
-]
-
-
-def fetch_news():
-    feeds = [
-        (
-            "KRİPTO",
-            "https://news.google.com/rss/search?q="
-            + urllib.parse.quote(
-                "Bitcoin OR Ethereum OR cryptocurrency market"
-            )
-            + "&hl=en-US&gl=US&ceid=US:en"
-        ),
-        (
-            "BIST",
-            "https://news.google.com/rss/search?q="
-            + urllib.parse.quote(
-                "Borsa Istanbul OR BIST 100 OR Turkish stocks"
-            )
-            + "&hl=tr&gl=TR&ceid=TR:tr"
-        )
-    ]
-
-    news = []
-
-    for category, url in feeds:
-        try:
-            xml_data = get_text(url)
-            root = ET.fromstring(xml_data)
-
-            for item in root.findall(".//item")[:15]:
-                title = item.findtext("title", "").strip()
-                link = item.findtext("link", "").strip()
-                pub_date = item.findtext("pubDate", "").strip()
-
-                if title:
-                    news.append({
-                        "category": category,
-                        "title": title,
-                        "link": link,
-                        "date": pub_date
-                    })
-
-        except Exception as exc:
-            print(f"Haber kaynağı hatası ({category}): {exc}")
-
-    return news
-
-
-def news_sentiment(news, category):
-    relevant = [
-        item for item in news
-        if item["category"] == category
-    ]
-
-    positive = 0
-    negative = 0
-
-    for item in relevant:
-        title = item["title"].lower()
-        positive += sum(word in title for word in POSITIVE_WORDS)
-        negative += sum(word in title for word in NEGATIVE_WORDS)
-
-    if positive > negative:
-        return 1, "Olumlu haber başlıkları daha fazla"
-    if negative > positive:
-        return -1, "Olumsuz haber başlıkları daha fazla"
-
-    return 0, "Haber yönü belirsiz veya nötr"
-
-
-# =========================================================
-# TEKNİK ANALİZ GÖSTERGELERİ
+# TEKNİK HESAPLAMALAR
 # =========================================================
 
 def ema(values, period):
-    if len(values) < period:
-        return None
-
+    result = []
     multiplier = 2 / (period + 1)
-    result = sum(values[:period]) / period
 
-    for value in values[period:]:
-        result = (value - result) * multiplier + result
+    current = values[0]
+
+    for value in values:
+        current = (value * multiplier) + (
+            current * (1 - multiplier)
+        )
+        result.append(current)
 
     return result
 
 
-def calculate_rsi(values, period=14):
-    if len(values) <= period:
-        return None
+def rsi(values, period=14):
+    if len(values) < period + 1:
+        return 50
 
     gains = []
     losses = []
@@ -181,12 +118,8 @@ def calculate_rsi(values, period=14):
         gains.append(max(change, 0))
         losses.append(max(-change, 0))
 
-    avg_gain = sum(gains[:period]) / period
-    avg_loss = sum(losses[:period]) / period
-
-    for i in range(period, len(gains)):
-        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
-        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+    avg_gain = sum(gains[-period:]) / period
+    avg_loss = sum(losses[-period:]) / period
 
     if avg_loss == 0:
         return 100
@@ -195,187 +128,249 @@ def calculate_rsi(values, period=14):
     return 100 - (100 / (1 + rs))
 
 
-def calculate_atr(candles, period=14):
-    if len(candles) <= period:
+def analyze(candles):
+    if not candles or len(candles) < 60:
         return None
 
-    ranges = []
+    closes = [x["close"] for x in candles]
+    highs = [x["high"] for x in candles]
+    lows = [x["low"] for x in candles]
+    volumes = [x["volume"] for x in candles]
 
-    for i in range(1, len(candles)):
-        high = candles[i]["high"]
-        low = candles[i]["low"]
-        previous_close = candles[i - 1]["close"]
+    e20 = ema(closes, 20)
+    e50 = ema(closes, 50)
 
-        ranges.append(max(
-            high - low,
-            abs(high - previous_close),
-            abs(low - previous_close)
-        ))
+    fast = ema(closes, 12)
+    slow = ema(closes, 26)
+    macd_line = [a - b for a, b in zip(fast, slow)]
+    signal_line = ema(macd_line, 9)
 
-    return sum(ranges[-period:]) / period
-
-
-def calculate_macd(values):
-    if len(values) < 35:
-        return None
-
-    fast = []
-    slow = []
-
-    for i in range(1, len(values) + 1):
-        fast.append(ema(values[:i], 12))
-        slow.append(ema(values[:i], 26))
-
-    macd_values = [
-        f - s for f, s in zip(fast, slow)
-        if f is not None and s is not None
-    ]
-
-    if len(macd_values) < 9:
-        return None
-
-    signal = ema(macd_values, 9)
-
-    if signal is None:
-        return None
-
-    return macd_values[-1] - signal
-
-
-def analyze_candles(candles, news_direction, news_text):
-    if len(candles) < 60:
-        return None
-
-    closes = [c["close"] for c in candles]
-    volumes = [c["volume"] for c in candles]
+    macd_positive = macd_line[-1] > signal_line[-1]
+    current_rsi = rsi(closes)
 
     price = closes[-1]
-    ema20 = ema(closes, 20)
-    ema50 = ema(closes, 50)
-    ema200 = ema(closes, 200) if len(closes) >= 200 else None
-    rsi = calculate_rsi(closes)
-    macd = calculate_macd(closes)
-    atr = calculate_atr(candles)
 
-    if None in (ema20, ema50, rsi, macd, atr):
-        return None
-
-    # Yön puanı: -100 ile +100 arasında.
-    score = 0
-    reasons = []
+    buy_score = 0
+    sell_score = 0
 
     # Trend
-    if price > ema20:
-        score += 15
-        reasons.append("Fiyat EMA20 üzerinde")
-    else:
-        score -= 15
-        reasons.append("Fiyat EMA20 altında")
+    if price > e20[-1]:
+        buy_score += 20
+    elif price < e20[-1]:
+        sell_score += 20
 
-    if ema20 > ema50:
-        score += 20
-        reasons.append("EMA20, EMA50 üzerinde")
-    else:
-        score -= 20
-        reasons.append("EMA20, EMA50 altında")
-
-    if ema200 is not None:
-        if price > ema200:
-            score += 15
-            reasons.append("Uzun vadeli trend olumlu")
-        else:
-            score -= 15
-            reasons.append("Uzun vadeli trend olumsuz")
+    if e20[-1] > e50[-1]:
+        buy_score += 20
+    elif e20[-1] < e50[-1]:
+        sell_score += 20
 
     # RSI
-    if 50 <= rsi <= 68:
-        score += 15
-        reasons.append("RSI yükselişi destekliyor")
-    elif rsi >= 75:
-        score -= 10
-        reasons.append("RSI aşırı alım bölgesinde")
-    elif rsi < 30:
-        score += 5
-        reasons.append("RSI aşırı satım bölgesinde")
-    elif rsi < 45:
-        score -= 15
-        reasons.append("RSI zayıf")
+    if 50 <= current_rsi <= 68:
+        buy_score += 15
+    elif current_rsi < 38:
+        buy_score += 10
+
+    if current_rsi < 45:
+        sell_score += 15
+    elif current_rsi > 72:
+        sell_score += 10
 
     # MACD
-    if macd > 0:
-        score += 15
-        reasons.append("MACD pozitif")
+    if macd_positive:
+        buy_score += 15
     else:
-        score -= 15
-        reasons.append("MACD negatif")
+        sell_score += 15
+
+    # Momentum
+    if closes[-1] > closes[-6]:
+        buy_score += 15
+    elif closes[-1] < closes[-6]:
+        sell_score += 15
 
     # Hacim
-    if len(volumes) >= 21:
-        average_volume = sum(volumes[-21:-1]) / 20
-        volume_ratio = (
-            volumes[-1] / average_volume
-            if average_volume > 0 else 1
+    recent_volume = sum(volumes[-5:]) / 5
+    previous_volume = sum(volumes[-20:-5]) / 15
+
+    if previous_volume > 0:
+        volume_ratio = recent_volume / previous_volume
+
+        if volume_ratio > 1.1 and price > closes[-2]:
+            buy_score += 15
+
+        elif volume_ratio > 1.1 and price < closes[-2]:
+            sell_score += 15
+
+    # ATR benzeri fiyat hareketi ölçümü
+    ranges = []
+
+    for i in range(1, min(15, len(candles))):
+        ranges.append(
+            max(
+                highs[-i] - lows[-i],
+                abs(highs[-i] - closes[-i - 1]),
+                abs(lows[-i] - closes[-i - 1])
+            )
         )
 
-        if volume_ratio >= 1.5:
-            score += 10 if score >= 0 else -10
-            reasons.append(f"Hacim ortalamanın {volume_ratio:.1f} katı")
-        else:
-            reasons.append("Hacim olağan seviyede")
+    atr = sum(ranges) / len(ranges) if ranges else price * 0.02
+
+    # AL / SAT / BEKLE
+    if buy_score >= BUY_LIMIT and buy_score > sell_score:
+        decision = "AL"
+    elif sell_score >= SELL_LIMIT and sell_score > buy_score:
+        decision = "SAT"
     else:
-        volume_ratio = 1
-
-    # Haber etkisi sınırlı ağırlıkta tutulur.
-    score += news_direction * 10
-    reasons.append(news_text)
-
-    score = max(-100, min(100, score))
-
-    if score >= 65:
-        signal = "GÜÇLÜ AL" if score >= 80 else "AL"
-    elif score <= -65:
-        signal = "GÜÇLÜ SAT" if score <= -80 else "SAT"
-    else:
-        signal = "BEKLE"
-
-    strength = abs(score)
-
-    support = min(c["low"] for c in candles[-20:])
-    resistance = max(c["high"] for c in candles[-20:])
-
-    stop_loss = price - (2 * atr) if score >= 0 else price + (2 * atr)
+        decision = "BEKLE"
 
     return {
-        "signal": signal,
-        "strength": strength,
-        "score": score,
+        "decision": decision,
+        "buy": buy_score,
+        "sell": sell_score,
         "price": price,
-        "rsi": rsi,
-        "support": support,
-        "resistance": resistance,
-        "stop_loss": stop_loss,
-        "volume_ratio": volume_ratio,
-        "reasons": reasons
+        "stop_buy": price - (atr * 1.5),
+        "target_buy": price + (atr * 2.5),
+        "stop_sell": price + (atr * 1.5),
+        "target_sell": price - (atr * 2.5)
     }
 
 
 # =========================================================
-# HAFTALIK MUM OLUŞTURMA
+# BINANCE VERİLERİ
 # =========================================================
 
-def daily_to_weekly(daily):
-    weekly = {}
+def binance_request(path):
+    return get_json(BINANCE + path)
+
+
+def get_binance_symbols():
+    info = binance_request("/api/v3/exchangeInfo")
+    tickers = binance_request("/api/v3/ticker/24hr")
+
+    if not info or not tickers:
+        return []
+
+    valid = {
+        item["symbol"]
+        for item in info["symbols"]
+        if item.get("status") == "TRADING"
+        and item.get("quoteAsset") in ("USDT", "TRY")
+        and item.get("isSpotTradingAllowed", False)
+    }
+
+    volumes = []
+
+    for ticker in tickers:
+        symbol = ticker.get("symbol")
+
+        if symbol in valid:
+            try:
+                volume = float(ticker.get("quoteVolume", 0))
+                volumes.append((symbol, volume))
+            except (ValueError, TypeError):
+                pass
+
+    usdt = sorted(
+        [(s, v) for s, v in volumes if s.endswith("USDT")],
+        key=lambda x: x[1],
+        reverse=True
+    )[:MAX_USDT_PAIRS]
+
+    try_pairs = [
+        (s, v) for s, v in volumes if s.endswith("TRY")
+    ]
+
+    return [x[0] for x in usdt + try_pairs]
+
+
+def get_binance_candles(symbol):
+    path = (
+        "/api/v3/klines"
+        f"?symbol={symbol}&interval=1d&limit=400"
+    )
+
+    data = binance_request(path)
+
+    if not data:
+        return []
+
+    candles = []
+
+    for row in data:
+        candles.append({
+            "time": int(row[0]),
+            "open": float(row[1]),
+            "high": float(row[2]),
+            "low": float(row[3]),
+            "close": float(row[4]),
+            "volume": float(row[5])
+        })
+
+    return candles
+
+
+# =========================================================
+# BIST VERİLERİ
+# =========================================================
+
+def get_bist_candles(symbol):
+    url = (
+        YAHOO + urllib.parse.quote(symbol + ".IS")
+        + "?range=2y&interval=1d"
+    )
+
+    data = get_json(url)
+
+    try:
+        result = data["chart"]["result"][0]
+        timestamps = result["timestamp"]
+        quote = result["indicators"]["quote"][0]
+
+        candles = []
+
+        for i, timestamp in enumerate(timestamps):
+            values = [
+                quote["open"][i],
+                quote["high"][i],
+                quote["low"][i],
+                quote["close"][i],
+                quote["volume"][i]
+            ]
+
+            if any(v is None for v in values):
+                continue
+
+            candles.append({
+                "time": timestamp * 1000,
+                "open": float(values[0]),
+                "high": float(values[1]),
+                "low": float(values[2]),
+                "close": float(values[3]),
+                "volume": float(values[4])
+            })
+
+        return candles
+
+    except Exception:
+        return []
+
+
+# =========================================================
+# HAFTALIK VERİ OLUŞTURMA
+# =========================================================
+
+def weekly_candles(daily):
+    weeks = {}
 
     for candle in daily:
-        # Binance mum açılış zamanları UTC'dir.
         date = datetime.fromtimestamp(
-            candle["time"] / 1000, timezone.utc
+            candle["time"] / 1000,
+            tz=timezone.utc
         )
-        year, week, _ = date.isocalendar()
-        key = (year, week)
 
-        if key not in weekly:
-            weekly[key] = {
+        key = date.strftime("%G-%V")
+
+        if key not in weeks:
+            weeks[key] = {
                 "time": candle["time"],
                 "open": candle["open"],
                 "high": candle["high"],
@@ -384,362 +379,196 @@ def daily_to_weekly(daily):
                 "volume": candle["volume"]
             }
         else:
-            item = weekly[key]
-            item["high"] = max(item["high"], candle["high"])
-            item["low"] = min(item["low"], candle["low"])
-            item["close"] = candle["close"]
-            item["volume"] += candle["volume"]
+            week = weeks[key]
+            week["high"] = max(week["high"], candle["high"])
+            week["low"] = min(week["low"], candle["low"])
+            week["close"] = candle["close"]
+            week["volume"] += candle["volume"]
 
-    # Yalnızca tamamlanmış haftalar kullanılır.
-    current_week = datetime.now(timezone.utc).isocalendar()[:2]
-
-    return [
-        item for key, item in sorted(weekly.items())
-        if key != current_week
-    ]
+    return list(weeks.values())[:-1]
 
 
 # =========================================================
-# BINANCE SPOT
+# TARAMA VE RAPOR
 # =========================================================
 
-def get_binance_symbols():
-    data = get_json(BINANCE_URL + "/api/v3/exchangeInfo")
-
-    return [
-        item["symbol"]
-        for item in data["symbols"]
-        if item.get("status") == "TRADING"
-        and item.get("isSpotTradingAllowed", False)
-        and item.get("quoteAsset") in QUOTE_ASSETS
-    ]
+def format_price(value):
+    return f"{value:,.6f}".rstrip("0").rstrip(".")
 
 
-def get_binance_tickers():
-    data = get_json(BINANCE_URL + "/api/v3/ticker/24hr")
-    return {item["symbol"]: item for item in data}
+def scan_asset(name, daily):
+    if len(daily) < 60:
+        return None
 
+    # Açık olan son günlük mum yerine kapanmış mumları kullan.
+    daily_closed = daily[:-1]
 
-def get_binance_candles(symbol):
-    url = (
-        BINANCE_URL
-        + "/api/v3/klines?"
-        + urllib.parse.urlencode({
-            "symbol": symbol,
-            "interval": "1d",
-            "limit": 500
-        })
+    weekly = weekly_candles(daily_closed)
+
+    daily_result = analyze(daily_closed)
+    weekly_result = analyze(weekly)
+
+    if not daily_result or not weekly_result:
+        return None
+
+    daily_buy = daily_result["buy"]
+    weekly_buy = weekly_result["buy"]
+
+    daily_sell = daily_result["sell"]
+    weekly_sell = weekly_result["sell"]
+
+    buy_alert = (
+        daily_result["decision"] == "AL"
+        and daily_buy >= BUY_LIMIT
+    ) or (
+        weekly_result["decision"] == "AL"
+        and weekly_buy >= BUY_LIMIT
     )
 
-    data = get_json(url)
-
-    candles = []
-
-    for row in data:
-        candles.append({
-            "time": row[0],
-            "open": float(row[1]),
-            "high": float(row[2]),
-            "low": float(row[3]),
-            "close": float(row[4]),
-            "volume": float(row[7])
-        })
-
-    # Açık olan son günlük mum çıkarılır.
-    if candles:
-        today = datetime.now(timezone.utc).date()
-        last_date = datetime.fromtimestamp(
-            candles[-1]["time"] / 1000,
-            timezone.utc
-        ).date()
-
-        if last_date == today:
-            candles.pop()
-
-    return candles
-
-
-# =========================================================
-# BIST 100 - YAHOO FINANCE
-# =========================================================
-
-def get_bist_candles(symbol):
-    yahoo_symbol = symbol + ".IS"
-
-    url = (
-        "https://query1.finance.yahoo.com/v8/finance/chart/"
-        + urllib.parse.quote(yahoo_symbol)
-        + "?range=2y&interval=1d"
+    sell_alert = (
+        daily_result["decision"] == "SAT"
+        and daily_sell >= SELL_LIMIT
+    ) or (
+        weekly_result["decision"] == "SAT"
+        and weekly_sell >= SELL_LIMIT
     )
 
-    data = get_json(url)
-    result = data["chart"]["result"]
+    if not buy_alert and not sell_alert:
+        return None
 
-    if not result:
-        raise ValueError("Yahoo Finance veri döndürmedi")
+    if buy_alert and (
+        not sell_alert
+        or max(daily_buy, weekly_buy) >= max(daily_sell, weekly_sell)
+    ):
+        action = "AL"
+        score = max(daily_buy, weekly_buy)
 
-    item = result[0]
-    timestamps = item["timestamp"]
-    quote = item["indicators"]["quote"][0]
+        return {
+            "name": name,
+            "action": action,
+            "score": score,
+            "daily": daily_result,
+            "weekly": weekly_result
+        }
 
-    candles = []
-
-    for i, stamp in enumerate(timestamps):
-        values = [
-            quote["open"][i],
-            quote["high"][i],
-            quote["low"][i],
-            quote["close"][i],
-            quote["volume"][i]
-        ]
-
-        if any(value is None for value in values):
-            continue
-
-        candles.append({
-            "time": stamp * 1000,
-            "open": float(values[0]),
-            "high": float(values[1]),
-            "low": float(values[2]),
-            "close": float(values[3]),
-            "volume": float(values[4])
-        })
-
-    # Son günlük mum henüz tamamlanmamış olabilir.
-    if candles:
-        last_date = datetime.fromtimestamp(
-            candles[-1]["time"] / 1000,
-            timezone.utc
-        ).date()
-
-        if last_date >= datetime.now(timezone.utc).date():
-            candles.pop()
-
-    return candles
+    return {
+        "name": name,
+        "action": "SAT",
+        "score": max(daily_sell, weekly_sell),
+        "daily": daily_result,
+        "weekly": weekly_result
+    }
 
 
-# =========================================================
-# TELEGRAM
-# =========================================================
+def build_message(results):
+    now = datetime.now().strftime("%d.%m.%Y %H:%M")
 
-def send_telegram(message):
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("Telegram bilgileri eksik. Mesaj gönderilemedi.")
-        return False
+    buys = [x for x in results if x["action"] == "AL"]
+    sells = [x for x in results if x["action"] == "SAT"]
 
-    url = (
-        "https://api.telegram.org/bot"
-        + TELEGRAM_TOKEN
-        + "/sendMessage"
-    )
-
-    payload = urllib.parse.urlencode({
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message,
-        "disable_web_page_preview": "true"
-    }).encode()
-
-    try:
-        req = urllib.request.Request(url, data=payload)
-        with urllib.request.urlopen(req, timeout=20) as response:
-            result = json.loads(response.read().decode())
-            return result.get("ok", False)
-    except Exception as exc:
-        print("Telegram gönderim hatası:", exc)
-        return False
-
-
-# =========================================================
-# RAPOR OLUŞTURMA
-# =========================================================
-
-def format_report(name, market, daily_result, weekly_result):
     lines = [
-        f"📊 {name} | {market}",
-        "━━━━━━━━━━━━━━━━━━"
+        "🚨 KRİPTO ALIM-SATIM MASASI",
+        f"📅 {now}",
+        "",
+        f"🟢 GÜÇLÜ AL FIRSATLARI: {len(buys)}"
     ]
 
-    for label, result in [
-        ("GÜNLÜK", daily_result),
-        ("HAFTALIK", weekly_result)
-    ]:
-        if not result:
-            lines.append(f"{label}: Yeterli veri yok")
-            continue
+    for item in sorted(buys, key=lambda x: x["score"], reverse=True):
+        d = item["daily"]
+        w = item["weekly"]
 
         lines.extend([
-            f"\n{label}: {result['signal']}",
-            f"Sinyal gücü: %{result['strength']:.0f}",
-            f"Fiyat: {result['price']:.6g}",
-            f"RSI: {result['rsi']:.1f}",
-            f"Destek: {result['support']:.6g}",
-            f"Direnç: {result['resistance']:.6g}",
-            f"Teknik zarar-kes seviyesi: {result['stop_loss']:.6g}",
-            "Nedenler:"
+            "",
+            f"🟢 {item['name']} — AL %{item['score']}",
+            f"Günlük: {d['decision']} | AL %{d['buy']}",
+            f"Haftalık: {w['decision']} | AL %{w['buy']}",
+            f"Fiyat: {format_price(d['price'])}",
+            f"Hedef: {format_price(d['target_buy'])}",
+            f"Stop: {format_price(d['stop_buy'])}"
         ])
 
-        for reason in result["reasons"][:6]:
-            lines.append("• " + reason)
+    if sells:
+        lines.extend([
+            "",
+            f"🔴 SAT UYARILARI: {len(sells)}"
+        ])
+
+        for item in sorted(sells, key=lambda x: x["score"], reverse=True):
+            d = item["daily"]
+            w = item["weekly"]
+
+            lines.extend([
+                "",
+                f"🔴 {item['name']} — SAT %{item['score']}",
+                f"Günlük: {d['decision']} | SAT %{d['sell']}",
+                f"Haftalık: {w['decision']} | SAT %{w['sell']}",
+                f"Fiyat: {format_price(d['price'])}",
+                f"Hedef: {format_price(d['target_sell'])}",
+                f"Stop: {format_price(d['stop_sell'])}"
+            ])
+
+    if not buys and not sells:
+        return None
+
+    lines.extend([
+        "",
+        "Not: Yüzdeler teknik sinyal puanıdır, kazanç garantisi veya",
+        "kanıtlanmış kazanma olasılığı değildir.",
+        "Veriler yatırım tavsiyesi değildir."
+    ])
 
     return "\n".join(lines)
 
 
-def chunks(lines, max_chars=3500):
-    result = []
-    current = ""
-
-    for line in lines:
-        if len(current) + len(line) + 1 > max_chars:
-            if current:
-                result.append(current)
-            current = line
-        else:
-            current = current + "\n" + line if current else line
-
-    if current:
-        result.append(current)
-
-    return result
-
-
-# =========================================================
-# ANA TARAMA
-# =========================================================
-
 def main():
-    print("Çoklu piyasa taraması başladı.")
+    print("Tarama başladı.")
 
-    news = fetch_news()
-    crypto_news = news_sentiment(news, "KRİPTO")
-    bist_news = news_sentiment(news, "BIST")
+    results = []
 
-    reports = []
-    errors = []
+    # Binance
+    symbols = get_binance_symbols()
+    print("Binance parite sayısı:", len(symbols))
 
-    # ---------------- BINANCE ----------------
-
-    try:
-        symbols = get_binance_symbols()
-        tickers = get_binance_tickers()
-
-        print(f"Binance Spot parite sayısı: {len(symbols)}")
-
-        for index, symbol in enumerate(symbols, start=1):
-            try:
-                daily = get_binance_candles(symbol)
-
-                if len(daily) < 60:
-                    continue
-
-                weekly = daily_to_weekly(daily)
-
-                daily_result = analyze_candles(
-                    daily, crypto_news[0], crypto_news[1]
-                )
-
-                weekly_result = analyze_candles(
-                    weekly, crypto_news[0], crypto_news[1]
-                )
-
-                if daily_result or weekly_result:
-                    reports.append(format_report(
-                        symbol, "BINANCE SPOT",
-                        daily_result, weekly_result
-                    ))
-
-                if index % 50 == 0:
-                    print(f"Binance tarandı: {index}/{len(symbols)}")
-
-            except Exception as exc:
-                errors.append(f"{symbol}: {str(exc)[:100]}")
-
-            time.sleep(REQUEST_DELAY)
-
-    except Exception as exc:
-        errors.append("Binance genel hata: " + str(exc)[:150])
-
-    # ---------------- BIST 100 ----------------
-
-    print(f"BIST 100 taraması başladı: {len(BIST100)} hisse")
-
-    for index, symbol in enumerate(BIST100, start=1):
+    for index, symbol in enumerate(symbols, 1):
         try:
-            daily = get_bist_candles(symbol)
+            candles = get_binance_candles(symbol)
+            result = scan_asset(symbol, candles)
 
-            if len(daily) < 60:
-                continue
+            if result:
+                results.append(result)
 
-            weekly = daily_to_weekly(daily)
+            if index % 25 == 0:
+                print("Binance tarandı:", index)
 
-            daily_result = analyze_candles(
-                daily, bist_news[0], bist_news[1]
-            )
-
-            weekly_result = analyze_candles(
-                weekly, bist_news[0], bist_news[1]
-            )
-
-            if daily_result or weekly_result:
-                reports.append(format_report(
-                    symbol, "BORSA ISTANBUL",
-                    daily_result, weekly_result
-                ))
-
-            if index % 20 == 0:
-                print(f"BIST tarandı: {index}/{len(BIST100)}")
-
-        except Exception as exc:
-            errors.append(f"{symbol}.IS: {str(exc)[:100]}")
+        except Exception as error:
+            print("Binance hata:", symbol, error)
 
         time.sleep(REQUEST_DELAY)
 
-    # ---------------- HABER ÖZETİ ----------------
+    # BIST
+    print("BIST taraması başladı.")
 
-    summary = [
-        "🌍 PİYASA HABER ÖZETİ",
-        "━━━━━━━━━━━━━━━━━━",
-        f"Kripto: {crypto_news[1]}",
-        f"BIST: {bist_news[1]}",
-        "",
-        "Not: Haber değerlendirmesi başlık anahtar kelimelerine dayanır."
-    ]
+    for symbol in BIST_SYMBOLS:
+        try:
+            candles = get_bist_candles(symbol)
+            result = scan_asset(symbol + ".IS", candles)
 
-    for item in news[:10]:
-        summary.append(
-            f"\n[{item['category']}] {item['title']}\n{item['link']}"
-        )
+            if result:
+                results.append(result)
 
-    reports.insert(0, "\n".join(summary))
+        except Exception as error:
+            print("BIST hata:", symbol, error)
 
-    # ---------------- TELEGRAM GÖNDERİMİ ----------------
+        time.sleep(REQUEST_DELAY)
 
-    header = (
-        "🤖 ÇOKLU PİYASA ANALİZ RAPORU\n"
-        f"Tarih: {datetime.now().strftime('%d.%m.%Y %H:%M')} UTC\n"
-        "Günlük + Haftalık | Binance Spot + BIST 100\n"
-        "Sinyal yüzdesi kazanma olasılığı değildir.\n"
-        "━━━━━━━━━━━━━━━━━━"
-    )
+    message = build_message(results)
 
-    messages = [header] + reports
-
-    if errors:
-        messages.append(
-            "⚠️ VERİ HATALARI\n"
-            + "\n".join(errors[:20])
-        )
-
-    for message in chunks(messages):
-        success = send_telegram(message)
-        print(
-            "Telegram mesajı gönderildi."
-            if success else "Telegram mesajı gönderilemedi."
-        )
-        time.sleep(1)
+    if message:
+        send_telegram(message)
+    else:
+        print("Şu anda eşik değerini geçen AL veya SAT sinyali yok.")
 
     print("Tarama tamamlandı.")
-    print(f"Toplam rapor: {len(reports)}")
-    print(f"Veri hatası: {len(errors)}")
 
 
 if __name__ == "__main__":
