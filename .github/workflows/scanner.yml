@@ -1,10 +1,9 @@
-
 name: Kripto Tarayici
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "*/15 * * * *"
 
 permissions:
   contents: write
@@ -35,6 +34,7 @@ jobs:
         run: python scanner.py
 
       - name: Sanal işlem kayıtlarını kaydet
+        if: always()
         run: |
           git config user.name "Kripto Tarayici"
           git config user.email "github-actions[bot]@users.noreply.github.com"
