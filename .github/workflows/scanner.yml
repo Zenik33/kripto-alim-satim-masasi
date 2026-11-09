@@ -1,13 +1,22 @@
+
 name: Kripto Tarayici
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 */4 * * *"
+    - cron: "*/5 * * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: kripto-tarayici
+  cancel-in-progress: false
 
 jobs:
   scan:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
 
     env:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -24,3 +33,11 @@ jobs:
 
       - name: Tarayıcıyı çalıştır
         run: python scanner.py
+
+      - name: Sanal işlem kayıtlarını kaydet
+        run: |
+          git config user.name "Kripto Tarayici"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add paper_state.json
+          git diff --cached --quiet || git commit -m "Sanal işlem kayıtlarını güncelle"
+          git push
