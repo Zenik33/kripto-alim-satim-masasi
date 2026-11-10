@@ -29,7 +29,13 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
+      - name: Telegram bağlantı testi
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          curl --fail --silent --show-error \
+            -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=❤️ TELEGRAM TESTİ BAŞARILI. Bot bağlantısı çalışıyor."
       - name: Tarayıcıyı çalıştır
         run: python scanner.py
 
