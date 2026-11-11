@@ -6,8 +6,8 @@
   "positions": {
     "PEPEUSDT": {
       "entry": 0.00026355,
-      "last_price": 0.0002486385,
-      "last_price_time": "2026-11-11T14:15:17.808419+00:00",
+      "last_price": 0.0002480374,
+      "last_price_time": "2026-11-11T15:12:03.807831+00:00",
       "quantity": 75811.11735921071,
       "cost": 20.0,
       "stop": 0.000237195,
@@ -17,7 +17,7 @@
   },
   "trades": [],
   "last_alerts": {
-    "PEPEUSDT_AL": "2026-11-11T08:17:03.669817+00:00"
+    "PEPEUSDT_AL": "2026-11-11T15:12:04.209584+00:00"
   },
   "started_message": true,
   "history": [
