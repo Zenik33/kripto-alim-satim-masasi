@@ -2,10 +2,22 @@
   "status": "running",
   "started": "2026-11-16T12:01:42.421371+00:00",
   "deadline": "2026-11-17T12:01:42.421371+00:00",
-  "cash": 100.0,
-  "positions": {},
+  "cash": 80.0,
+  "positions": {
+    "SHELLTRY": {
+      "entry": 1.313,
+      "last_price": 1.313,
+      "quantity": 15.217075384630604,
+      "cost": 20.0,
+      "stop": 1.1817,
+      "target": 1.9622857142857142,
+      "opened": "2026-11-17T00:15:59.962164+00:00"
+    }
+  },
   "trades": [],
-  "last_alerts": {},
+  "last_alerts": {
+    "SHELLTRY_AL": "2026-11-17T00:16:01.118839+00:00"
+  },
   "last_heartbeat": "2026-11-16T23:26:28.140693+00:00",
   "history": [
     {
@@ -120,6 +132,6 @@
       "trades": []
     }
   ],
-  "scan_count": 10,
-  "last_scan": "2026-11-16T23:26:27.737200+00:00"
+  "scan_count": 11,
+  "last_scan": "2026-11-17T00:16:01.118862+00:00"
 }
