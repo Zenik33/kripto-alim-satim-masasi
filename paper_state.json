@@ -6,13 +6,13 @@
   "positions": {
     "SHELLTRY": {
       "entry": 1.327,
-      "last_price": 1.43,
+      "last_price": 1.436,
       "quantity": 15.056533519231335,
       "cost": 20.0,
-      "stop": 1.39425,
+      "stop": 1.4001,
       "target": 1.9762857142857144,
       "opened": "2026-11-17T13:57:53.727996+00:00",
-      "peak_price": 1.43,
+      "peak_price": 1.436,
       "initial_stop": 1.1943,
       "stop_mode": "TRAILING"
     }
@@ -141,6 +141,6 @@
       "trades": []
     }
   ],
-  "scan_count": 19,
-  "last_scan": "2026-11-18T09:03:20.493237+00:00"
+  "scan_count": 20,
+  "last_scan": "2026-11-18T09:32:26.863514+00:00"
 }
