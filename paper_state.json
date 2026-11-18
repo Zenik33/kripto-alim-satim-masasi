@@ -6,7 +6,7 @@
   "positions": {
     "SHELLTRY": {
       "entry": 1.327,
-      "last_price": 1.357,
+      "last_price": 1.39,
       "quantity": 15.056533519231335,
       "cost": 20.0,
       "stop": 1.1943,
@@ -138,6 +138,6 @@
       "trades": []
     }
   ],
-  "scan_count": 16,
-  "last_scan": "2026-11-18T05:44:55.776694+00:00"
+  "scan_count": 17,
+  "last_scan": "2026-11-18T06:48:36.503631+00:00"
 }
