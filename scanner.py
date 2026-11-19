@@ -6,7 +6,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
-BASE_URL = "https://api.binance.com"
+BASE_URL = "https://api-gcp.binance.com"
 STATE_FILE = "paper_state.json"
 STARTING_BALANCE = 100.0
 MAX_TRADE_VALUE = 20.0
