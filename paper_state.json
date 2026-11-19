@@ -12,7 +12,7 @@
       "stop": 0.8442857142857142,
       "target": 1.9368571428571428,
       "peak_price": 1.268,
-      "last_price": 1.268,
+      "last_price": 1.261,
       "opened": "2026-11-19T10:08:23.652476+00:00"
     }
   },
@@ -21,5 +21,5 @@
   "daily_date": "2026-11-19",
   "daily_start_equity": 100.0,
   "last_report": "2026-11-19T09:57:17.108801+00:00",
-  "scan_count": 2
+  "scan_count": 3
 }
