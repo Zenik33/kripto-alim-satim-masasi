@@ -188,7 +188,8 @@ def new_state(history=None):
         "last_heartbeat": None,
         "history": history or [],
         "scan_count": 0,
-        "last_scan": None
+        "last_scan": None,
+        "startup_notification_sent": False
     }
 
 
@@ -224,6 +225,7 @@ def load_state():
         state.setdefault("cash", STARTING_BALANCE)
         state.setdefault("scan_count", 0)
         state.setdefault("last_heartbeat", None)
+        state.setdefault("startup_notification_sent", False)
 
         if state.get("status") == "completed":
 
@@ -1072,14 +1074,27 @@ def main():
             state.get("history", [])
         )
 
-    if state.get("scan_count", 0) == 0:
+    # Başlangıç bildirimi yalnızca Telegram'a başarıyla
+    # gönderildikten sonra tamamlandı olarak kaydedilir.
+    if not state.get("startup_notification_sent", False):
 
-        telegram(
-            "🧪 24 SAATLİK SANAL TEST BAŞLADI\n"
-            "Başlangıç: 100 TL\n"
-            "Binance Spot taraması aktif.\n"
+        startup_message = (
+            "🧪 24 SAATLİK SANAL TEST BAŞLADI\\n"
+            "Başlangıç: 100 TL\\n"
+            "Binance Spot taraması aktif.\\n"
             "Gerçek para ve gerçek emir kullanılmıyor."
         )
+
+        if telegram(startup_message):
+
+            state["startup_notification_sent"] = True
+            save_state(state)
+
+            print("STARTUP_NOTIFICATION_SENT")
+
+        else:
+
+            print("STARTUP_NOTIFICATION_PENDING")
 
     held = list(state["positions"])
 
