@@ -1,1289 +1,651 @@
 
-import os
+
+import concurrent.futures
 import json
+import os
 import time
-import urllib.request
 import urllib.parse
-import traceback
-
+import urllib.request
 from datetime import datetime, timedelta, timezone
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# ============================================================
-# KRIPTO TARAMA MASASI - GELISTIRILMIS SANAL SURUM 3.0
-# Gercek emir gondermez.
-# Binance herkese acik piyasa verilerini kullanir.
-# ============================================================
-
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
-
-BINANCE = "https://data-api.binance.vision"
+BASE_URL = "https://api.binance.com"
 STATE_FILE = "paper_state.json"
-
 STARTING_BALANCE = 100.0
+MAX_TRADE_VALUE = 20.0
+MAX_POSITIONS = 5
+RISK_PER_TRADE = 0.01
+MAX_DAILY_LOSS = 0.03
+FEE_RATE = 0.001
+
+ATR_STOP_MULTIPLIER = 1.5
+ATR_TARGET_MULTIPLIER = 2.5
+TRAILING_ACTIVATION = 0.05
+TRAILING_DISTANCE = 0.025
+BREAK_EVEN_ACTIVATION = 0.03
+REENTRY_WAIT_HOURS = 6
+
+USDT_PAIR_COUNT = 40
+TRY_PAIR_COUNT = 20
+BUY_SCORE_MIN = 75
+SELL_SCORE_MIN = 70
+MIN_VOLUME_RATIO = 1.10
+MIN_RSI = 48
+MAX_RSI = 68
+MAX_WORKERS = 8
+REPORT_INTERVAL_SECONDS = 7200
 TEST_HOURS = 24
 
-BUY_LIMIT = 85
-SELL_LIMIT = 80
-
-MAX_POSITIONS = 5
-TRADE_ALLOCATION = 0.20
-
-FEE = 0.001
-
-STOP_ATR = 1.5
-TARGET_ATR = 2.5
-
-# Kâr koruma ayarlari
-BREAK_EVEN_TRIGGER = 0.03
-TRAILING_TRIGGER = 0.05
-TRAILING_DISTANCE = 0.025
-
-MAX_USDT_PAIRS = 40
-MAX_TRY_PAIRS = 20
-MAX_WORKERS = 8
-
-MIN_VOLUME_RATIO = 1.10
-MIN_RSI_BUY = 48
-MAX_RSI_BUY = 68
-
-HEARTBEAT_HOURS = 2
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 STABLECOINS = {
-    "USDC", "USDT", "BUSD", "TUSD", "FDUSD",
-    "USDP", "DAI", "USDE", "USDS", "RLUSD",
-    "PYUSD", "EURC", "USDD", "FRAX", "USTC",
-    "UST", "EURS", "AEUR", "USD1", "USDTB", "USDF"
+    "USDC", "USDT", "BUSD", "TUSD", "FDUSD", "USDP",
+    "DAI", "USDE", "USDS", "PYUSD", "EURC", "USTC"
 }
 
-
-# ============================================================
-# ZAMAN VE FORMAT
-# ============================================================
 
 def now():
     return datetime.now(timezone.utc)
 
 
-def stamp(value=None):
-    return (value or now()).isoformat()
+def iso_now():
+    return now().isoformat()
 
-
-def money(value):
-    return f"{value:.2f} TL"
-
-
-def price_money(value):
-    value = float(value)
-    absolute = abs(value)
-
-    decimals = (
-        2 if absolute >= 100
-        else 4 if absolute >= 1
-        else 7 if absolute >= 0.01
-        else 10
-    )
-
-    return f"{value:.{decimals}f} TL"
-
-
-# ============================================================
-# TELEGRAM
-# ============================================================
 
 def telegram(message):
-
-    if not TOKEN or not CHAT_ID:
-        print("TELEGRAM_CONFIG_ERROR")
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print(message)
         return False
-
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-
-    data = urllib.parse.urlencode({
-        "chat_id": CHAT_ID,
-        "text": message,
-        "disable_web_page_preview": "true"
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = urllib.parse.urlencode({
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message[:4000]
     }).encode()
-
-    request = urllib.request.Request(
-        url,
-        data=data,
-        headers={"User-Agent": "KriptoTarayici/3.0"}
-    )
-
+    request = urllib.request.Request(url, data=payload, method="POST")
     try:
         with urllib.request.urlopen(request, timeout=20) as response:
-            result = json.loads(response.read().decode())
-
-        if result.get("ok") is not True:
-            print("TELEGRAM_API_ERROR:", result)
-            return False
-
-        print("TELEGRAM_OK")
-        return True
-
+            return bool(json.loads(response.read().decode()).get("ok"))
     except Exception as exc:
-        print("TELEGRAM_SEND_ERROR:", repr(exc))
+        print("Telegram gonderim hatasi:", exc)
         return False
 
 
-# ============================================================
-# BINANCE API
-# ============================================================
-
-def get_json(path, params=None, timeout=20, attempts=3):
-
-    url = BINANCE + path
-
+def http_get(path, params=None):
+    url = BASE_URL + path
     if params:
         url += "?" + urllib.parse.urlencode(params)
-
-    for attempt in range(attempts):
-
+    error = None
+    for attempt in range(3):
         try:
-            request = urllib.request.Request(
-                url,
-                headers={"User-Agent": "Mozilla/5.0"}
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "MasaTarayici/5.0"}
             )
-
-            with urllib.request.urlopen(
-                request,
-                timeout=timeout
-            ) as response:
-
+            with urllib.request.urlopen(req, timeout=25) as response:
                 return json.loads(response.read().decode())
-
         except Exception as exc:
+            error = exc
+            time.sleep(1.5 * (attempt + 1))
+    raise RuntimeError(f"Binance API hatasi: {error}")
 
-            print(
-                f"BINANCE_REQUEST_ERROR "
-                f"attempt={attempt + 1}: {exc}"
-            )
 
-            if attempt + 1 < attempts:
-                time.sleep(2 * (attempt + 1))
+def get_usdt_try_rate():
+    data = http_get("/api/v3/ticker/price", {"symbol": "USDTTRY"})
+    return float(data["price"])
 
-    raise RuntimeError(f"Binance verisi alinamadi: {path}")
 
-
-# ============================================================
-# SANAL PORTFOY
-# ============================================================
-
-def new_state(history=None):
-
-    start = now()
-
-    return {
-        "status": "running",
-        "started": stamp(start),
-        "deadline": stamp(
-            start + timedelta(hours=TEST_HOURS)
-        ),
-        "cash": STARTING_BALANCE,
-        "positions": {},
-        "trades": [],
-        "last_alerts": {},
-        "last_heartbeat": None,
-        "history": history or [],
-        "scan_count": 0,
-        "last_scan": None,
-        "startup_notification_sent": False
-    }
-
-
-def save_state(state):
-
-    temporary = STATE_FILE + ".tmp"
-
-    with open(temporary, "w", encoding="utf-8") as file:
-        json.dump(
-            state,
-            file,
-            ensure_ascii=False,
-            indent=2
-        )
-
-    os.replace(temporary, STATE_FILE)
-
-
-def load_state():
-
-    if not os.path.exists(STATE_FILE):
-        return new_state()
-
-    try:
-
-        with open(STATE_FILE, encoding="utf-8") as file:
-            state = json.load(file)
-
-        state.setdefault("positions", {})
-        state.setdefault("trades", [])
-        state.setdefault("last_alerts", {})
-        state.setdefault("history", [])
-        state.setdefault("cash", STARTING_BALANCE)
-        state.setdefault("scan_count", 0)
-        state.setdefault("last_heartbeat", None)
-        state.setdefault("startup_notification_sent", False)
-
-        if state.get("status") == "completed":
-
-            history = list(state.get("history", []))
-
-            history.append({
-                "started": state.get("started"),
-                "completed": state.get("completed"),
-                "total_pnl": state.get("total_pnl", 0),
-                "trades": state.get("trades", [])
-            })
-
-            return new_state(history[-20:])
-
-        return state
-
-    except Exception as exc:
-
-        print("STATE_READ_ERROR:", exc)
-
-        # Bozuk dosyayi sessizce sifirlamiyoruz.
-        raise RuntimeError(
-            "paper_state.json okunamadi. "
-            "Dosyayi kontrol etmeden yeni test baslatilmayacak."
-        ) from exc
-
-
-# ============================================================
-# TEKNIK ANALIZ
-# ============================================================
-
-def ema(values, period):
-
-    if not values:
-        return []
-
-    k = 2 / (period + 1)
-
-    output = []
-    current = values[0]
-
-    for value in values:
-
-        current = (
-            value * k
-            + current * (1 - k)
-        )
-
-        output.append(current)
-
-    return output
-
-
-def rsi(values, period=14):
-
-    if len(values) <= period:
-        return 50.0
-
-    changes = [
-        values[i] - values[i - 1]
-        for i in range(1, len(values))
-    ]
-
-    gains = [max(v, 0) for v in changes]
-    losses = [max(-v, 0) for v in changes]
-
-    average_gain = sum(gains[:period]) / period
-    average_loss = sum(losses[:period]) / period
-
-    for i in range(period, len(gains)):
-
-        average_gain = (
-            average_gain * (period - 1)
-            + gains[i]
-        ) / period
-
-        average_loss = (
-            average_loss * (period - 1)
-            + losses[i]
-        ) / period
-
-    if average_loss == 0:
-        return 100.0
-
-    rs = average_gain / average_loss
-
-    return 100 - (100 / (1 + rs))
-
-
-def atr(candles, period=14):
-
-    if len(candles) <= period:
-        return 0.0
-
-    ranges = []
-
-    for i in range(1, len(candles)):
-
-        high = candles[i]["high"]
-        low = candles[i]["low"]
-        previous = candles[i - 1]["close"]
-
-        ranges.append(max(
-            high - low,
-            abs(high - previous),
-            abs(low - previous)
-        ))
-
-    return sum(ranges[-period:]) / period
-
-
-def analyze(candles):
-
-    if len(candles) < 60:
-        return None
-
-    closes = [c["close"] for c in candles]
-    volumes = [c["volume"] for c in candles]
-
-    ema20 = ema(closes, 20)
-    ema50 = ema(closes, 50)
-
-    macd = [
-        a - b
-        for a, b in zip(
-            ema(closes, 12),
-            ema(closes, 26)
-        )
-    ]
-
-    signal = ema(macd, 9)
-    current_rsi = rsi(closes)
-
-    buy = 0
-    sell = 0
-
-    if closes[-1] > ema20[-1]:
-        buy += 20
-    elif closes[-1] < ema20[-1]:
-        sell += 20
-
-    if ema20[-1] > ema50[-1]:
-        buy += 20
-    elif ema20[-1] < ema50[-1]:
-        sell += 20
-
-    if MIN_RSI_BUY <= current_rsi <= MAX_RSI_BUY:
-        buy += 15
-    elif current_rsi < 40:
-        buy += 5
-        sell += 10
-
-    if current_rsi > 72:
-        sell += 15
-
-    if macd[-1] > signal[-1]:
-        buy += 15
-    else:
-        sell += 15
-
-    if closes[-1] > closes[-6]:
-        buy += 15
-    elif closes[-1] < closes[-6]:
-        sell += 15
-
-    recent_volume = sum(volumes[-5:]) / 5
-    older_volume = sum(volumes[-20:-5]) / 15
-
-    volume_ratio = (
-        recent_volume / older_volume
-        if older_volume > 0 else 0
-    )
-
-    if volume_ratio >= MIN_VOLUME_RATIO:
-
-        if closes[-1] > closes[-2]:
-            buy += 15
-        elif closes[-1] < closes[-2]:
-            sell += 15
-
-    if ema20[-1] > ema20[-4]:
-        buy += 10
-    elif ema20[-1] < ema20[-4]:
-        sell += 10
-
-    decision = "BEKLE"
-
-    if buy >= BUY_LIMIT and buy > sell:
-        decision = "AL"
-
-    elif sell >= SELL_LIMIT and sell > buy:
-        decision = "SAT"
-
-    return {
-        "decision": decision,
-        "buy": min(buy, 100),
-        "sell": min(sell, 100),
-        "price": closes[-1],
-        "atr": atr(candles),
-        "rsi": current_rsi,
-        "volume_ratio": volume_ratio
-    }
-
-
-# ============================================================
-# HAFTALIK MUM
-# ============================================================
-
-def weekly_candles(daily):
-
-    weeks = {}
-
-    for candle in daily:
-
-        dt = datetime.fromtimestamp(
-            candle["time"] / 1000,
-            tz=timezone.utc
-        )
-
-        key = dt.strftime("%G-%V")
-
-        if key not in weeks:
-            weeks[key] = dict(candle)
-
-        else:
-
-            week = weeks[key]
-
-            week["high"] = max(
-                week["high"],
-                candle["high"]
-            )
-
-            week["low"] = min(
-                week["low"],
-                candle["low"]
-            )
-
-            week["close"] = candle["close"]
-            week["volume"] += candle["volume"]
-
-    # Tamamlanmamış son haftayı kullanma.
-    return list(weeks.values())[:-1]
-
-
-# ============================================================
-# PIYASA TARAMASI
-# ============================================================
-
-def market_data(held=None):
-
-    held = set(held or [])
-
-    info = get_json("/api/v3/exchangeInfo")
-    tickers = get_json("/api/v3/ticker/24hr")
-
-    valid = {}
-
+def get_symbols():
+    info = http_get("/api/v3/exchangeInfo")
+    tickers = http_get("/api/v3/ticker/24hr")
+    allowed = {}
     for item in info.get("symbols", []):
-
         if (
             item.get("status") == "TRADING"
             and item.get("quoteAsset") in ("USDT", "TRY")
             and item.get("isSpotTradingAllowed", False)
+            and item.get("baseAsset") not in STABLECOINS
         ):
+            allowed[item["symbol"]] = item
 
-            if (
-                item.get("baseAsset") not in STABLECOINS
-                or item.get("symbol") == "USDTTRY"
-            ):
-
-                valid[item["symbol"]] = item
-
+    usdt_pairs, try_pairs = [], []
     prices = {}
-    usdt = []
-    tries = []
-
     for ticker in tickers:
-
         symbol = ticker.get("symbol")
-        details = valid.get(symbol)
-
-        if not details:
+        if symbol not in allowed:
             continue
-
         try:
-
-            prices[symbol] = float(ticker["lastPrice"])
-
-            if symbol == "USDTTRY":
-                continue
-
-            volume = float(
-                ticker.get("quoteVolume", 0)
-            )
-
-            if details["quoteAsset"] == "USDT":
-                usdt.append((symbol, volume))
-
-            else:
-                tries.append((symbol, volume))
-
-        except (ValueError, TypeError, KeyError):
+            volume = float(ticker.get("quoteVolume", 0))
+            price = float(ticker.get("lastPrice", 0))
+        except (TypeError, ValueError):
             continue
+        if volume <= 0 or price <= 0:
+            continue
+        prices[symbol] = price
+        row = (symbol, volume)
+        if allowed[symbol]["quoteAsset"] == "USDT":
+            usdt_pairs.append(row)
+        else:
+            try_pairs.append(row)
 
-    selected = [
-        symbol
-        for symbol, _ in sorted(
-            usdt,
-            key=lambda x: x[1],
-            reverse=True
-        )[:MAX_USDT_PAIRS]
-    ]
-
-    selected += [
-        symbol
-        for symbol, _ in sorted(
-            tries,
-            key=lambda x: x[1],
-            reverse=True
-        )[:MAX_TRY_PAIRS]
-    ]
-
-    selected += [
-        symbol
-        for symbol in held
-        if symbol in prices and symbol not in selected
-    ]
-
-    return list(dict.fromkeys(selected)), prices
-
-
-def candles_for(symbol):
-
-    rows = get_json(
-        "/api/v3/klines",
-        {
-            "symbol": symbol,
-            "interval": "1d",
-            "limit": 1000
-        }
+    usdt_pairs.sort(key=lambda x: x[1], reverse=True)
+    try_pairs.sort(key=lambda x: x[1], reverse=True)
+    selected = (
+        [s for s, _ in usdt_pairs[:USDT_PAIR_COUNT]]
+        + [s for s, _ in try_pairs[:TRY_PAIR_COUNT]]
     )
+    return selected, prices
 
-    output = []
 
+def get_klines(symbol, interval, limit=120):
+    rows = http_get("/api/v3/klines", {
+        "symbol": symbol, "interval": interval, "limit": limit
+    })
+    current_ms = int(time.time() * 1000)
+    result = []
     for row in rows:
-
-        try:
-
-            output.append({
-                "time": int(row[0]),
-                "open": float(row[1]),
-                "high": float(row[2]),
-                "low": float(row[3]),
-                "close": float(row[4]),
-                "volume": float(row[5])
-            })
-
-        except (ValueError, TypeError, IndexError):
-            continue
-
-    return symbol, output
+        candle = {
+            "open_time": int(row[0]),
+            "open": float(row[1]),
+            "high": float(row[2]),
+            "low": float(row[3]),
+            "close": float(row[4]),
+            "volume": float(row[5]),
+            "close_time": int(row[6])
+        }
+        # Sadece kapanmis mumlar kullanilir.
+        if candle["close_time"] < current_ms:
+            result.append(candle)
+    return result
 
 
-# ============================================================
-# SINYAL DEGERLENDIRME
-# ============================================================
+def ema(values, period):
+    if len(values) < period:
+        return []
+    alpha = 2.0 / (period + 1)
+    out = [float(values[0])]
+    for value in values[1:]:
+        out.append(alpha * float(value) + (1 - alpha) * out[-1])
+    return out
 
-def evaluate(symbol, candles, price, conversion):
 
-    if len(candles) < 61 or not price:
+def rsi(values, period=14):
+    if len(values) <= period:
+        return 50.0
+    changes = [values[i] - values[i - 1] for i in range(1, len(values))]
+    gains = [max(x, 0.0) for x in changes]
+    losses = [max(-x, 0.0) for x in changes]
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    for i in range(period, len(gains)):
+        avg_gain = ((period - 1) * avg_gain + gains[i]) / period
+        avg_loss = ((period - 1) * avg_loss + losses[i]) / period
+    if avg_loss == 0:
+        return 100.0 if avg_gain > 0 else 50.0
+    rs = avg_gain / avg_loss
+    return 100.0 - 100.0 / (1.0 + rs)
+
+
+def atr(candles, period=14):
+    if len(candles) <= period:
+        return 0.0
+    ranges = []
+    for i in range(1, len(candles)):
+        cur = candles[i]
+        prev_close = candles[i - 1]["close"]
+        ranges.append(max(
+            cur["high"] - cur["low"],
+            abs(cur["high"] - prev_close),
+            abs(cur["low"] - prev_close)
+        ))
+    return sum(ranges[-period:]) / period
+
+
+def analyze(candles):
+    if len(candles) < 60:
+        return None
+    closes = [c["close"] for c in candles]
+    volumes = [c["volume"] for c in candles]
+    e20, e50 = ema(closes, 20), ema(closes, 50)
+    e12, e26 = ema(closes, 12), ema(closes, 26)
+    if not all((e20, e50, e12, e26)):
         return None
 
-    daily = candles[:-1]
-
-    day = analyze(daily)
-    week = analyze(weekly_candles(daily))
-
-    if not day or not week:
+    macd = [a - b for a, b in zip(e12, e26)]
+    signal = ema(macd, 9)
+    if not signal:
         return None
 
-    buy = (
-        day["decision"] == "AL"
-        and day["buy"] >= BUY_LIMIT
-        and week["decision"] == "AL"
-        and week["buy"] >= BUY_LIMIT
-        and MIN_RSI_BUY <= day["rsi"] <= MAX_RSI_BUY
-        and day["volume_ratio"] >= MIN_VOLUME_RATIO
-    )
+    current_rsi = rsi(closes)
+    buy = 0
+    buy += 20 if closes[-1] > e20[-1] else 0
+    buy += 20 if e20[-1] > e50[-1] else 0
+    buy += 15 if 48 <= current_rsi <= 68 else 0
+    buy += 15 if macd[-1] > signal[-1] else 0
+    buy += 15 if closes[-1] > closes[-6] else 0
+    buy += 10 if e20[-1] > e20[-4] else 0
 
-    sell = (
-        day["decision"] == "SAT"
-        and day["sell"] >= SELL_LIMIT
-    ) or (
-        week["decision"] == "SAT"
-        and week["sell"] >= SELL_LIMIT
-    )
+    recent_vol = sum(volumes[-5:]) / 5
+    base_vol = sum(volumes[-20:-5]) / 15
+    vol_ratio = recent_vol / base_vol if base_vol > 0 else 0
+    if vol_ratio >= MIN_VOLUME_RATIO and closes[-1] > closes[-2]:
+        buy += 5
+
+    sell = 0
+    sell += 25 if closes[-1] < e20[-1] else 0
+    sell += 25 if e20[-1] < e50[-1] else 0
+    sell += 25 if macd[-1] < signal[-1] else 0
+    sell += 25 if closes[-1] < closes[-6] else 0
 
     return {
-        "price": price * conversion,
-        "atr": day["atr"] * conversion,
-        "daily": day,
-        "weekly": week,
-        "buy_alert": buy,
-        "sell_alert": sell
+        "buy_score": min(buy, 100),
+        "sell_score": min(sell, 100),
+        "rsi": current_rsi,
+        "volume_ratio": vol_ratio,
+        "atr": atr(candles),
+        "close": closes[-1]
     }
 
 
-# ============================================================
-# SANAL ISLEM KAPATMA
-# ============================================================
+def evaluate_symbol(symbol, raw_price, usdt_try):
+    try:
+        # Haftalik analiz artik 120 adet GERCEK 1w mumu kullanir.
+        daily = get_klines(symbol, "1d", 120)
+        weekly = get_klines(symbol, "1w", 120)
+        day = analyze(daily)
+        week = analyze(weekly)
+        if day is None or week is None:
+            return None
 
-def close_position(state, symbol, price, reason):
-
-    position = state["positions"].get(symbol)
-
-    if (
-        not position
-        or price is None
-        or price <= 0
-    ):
+        conversion = usdt_try if symbol.endswith("USDT") else 1.0
+        price_try = raw_price * conversion
+        atr_try = day["atr"] * conversion
+        buy_signal = (
+            day["buy_score"] >= BUY_SCORE_MIN
+            and week["buy_score"] >= BUY_SCORE_MIN
+            and MIN_RSI <= day["rsi"] <= MAX_RSI
+            and day["volume_ratio"] >= MIN_VOLUME_RATIO
+            and atr_try > 0
+            and price_try > 0
+        )
+        sell_signal = (
+            day["sell_score"] >= SELL_SCORE_MIN
+            or week["sell_score"] >= SELL_SCORE_MIN
+        )
+        return {
+            "price": price_try,
+            "atr": atr_try,
+            "daily": day,
+            "weekly": week,
+            "buy_signal": buy_signal,
+            "sell_signal": sell_signal
+        }
+    except Exception as exc:
+        print(f"{symbol} analiz hatasi: {exc}")
         return None
 
-    # Satis komisyonu dusulmus net gelir.
-    proceeds = (
-        position["quantity"]
-        * price
-        * (1 - FEE)
-    )
 
-    pnl = proceeds - position["cost"]
-
-    state["cash"] += proceeds
-    state["positions"].pop(symbol, None)
-
-    trade = {
-        "symbol": symbol,
-        "entry": position["entry"],
-        "exit": price,
-        "quantity": position["quantity"],
-        "cost": position["cost"],
-        "proceeds_after_fee": proceeds,
-        "pnl": pnl,
-        "pnl_percent": (
-            pnl / position["cost"] * 100
-            if position["cost"] else 0
-        ),
-        "reason": reason,
-        "opened": position.get("opened"),
-        "closed": stamp()
+def new_state():
+    start = now()
+    return {
+        "version": 5,
+        "status": "running",
+        "started": start.isoformat(),
+        "deadline": (start + timedelta(hours=TEST_HOURS)).isoformat(),
+        "cash": STARTING_BALANCE,
+        "positions": {},
+        "trades": [],
+        "cooldowns": {},
+        "daily_date": start.date().isoformat(),
+        "daily_start_equity": STARTING_BALANCE,
+        "last_report": start.isoformat(),
+        "scan_count": 0
     }
 
-    state["trades"].append(trade)
 
-    return trade
+def save_state(state):
+    temp = STATE_FILE + ".tmp"
+    with open(temp, "w", encoding="utf-8") as file:
+        json.dump(state, file, ensure_ascii=False, indent=2)
+    os.replace(temp, STATE_FILE)
 
 
-# ============================================================
-# TRAILING STOP VE BASABAS KORUMASI
-# ============================================================
-
-def update_paper(state, market):
-
-    events = []
-
-    for symbol, position in list(
-        state["positions"].items()
-    ):
-
-        item = market.get(symbol)
-
-        if not item:
-            continue
-
-        price = item["price"]
-
-        position["last_price"] = price
-
-        position.setdefault(
-            "peak_price",
-            max(position.get("entry", price), price)
-        )
-
-        position.setdefault(
-            "initial_stop",
-            position.get("stop", position["entry"] * 0.90)
-        )
-
-        position.setdefault("stop_mode", "INITIAL")
-
-        # En yuksek gorulen fiyat.
-        position["peak_price"] = max(
-            position["peak_price"],
-            price
-        )
-
-        gain = (
-            price / position["entry"] - 1
-            if position["entry"] else 0
-        )
-
-        # Alis ve satis komisyonu dahil basabas fiyati.
-        break_even_price = (
-            position["cost"]
-            / (position["quantity"] * (1 - FEE))
-            if position["quantity"] > 0
-            else position["entry"]
-        )
-
-        # %3 yukseliste basabas korumasi.
-        if gain >= BREAK_EVEN_TRIGGER:
-
-            position["stop"] = max(
-                position["stop"],
-                break_even_price
-            )
-
-            position["stop_mode"] = "BREAK_EVEN"
-
-        # %5 yukseliste trailing stop.
-        if gain >= TRAILING_TRIGGER:
-
-            trailing_stop = (
-                position["peak_price"]
-                * (1 - TRAILING_DISTANCE)
-            )
-
-            position["stop"] = max(
-                position["stop"],
-                break_even_price,
-                trailing_stop
-            )
-
-            position["stop_mode"] = "TRAILING"
-
-        reason = None
-
-        if price <= position["stop"]:
-
-            if position["stop_mode"] == "TRAILING":
-                reason = "TRAILING STOP"
-
-            elif position["stop_mode"] == "BREAK_EVEN":
-                reason = "BASABAS STOP"
-
-            else:
-                reason = "STOP"
-
-        elif price >= position["target"]:
-            reason = "HEDEF"
-
-        elif item["sell_alert"]:
-            reason = "SAT SINYALI"
-
-        if reason:
-
-            trade = close_position(
-                state,
-                symbol,
-                price,
-                reason
-            )
-
-            if trade:
-
-                events.append(
-                    f"🔴 SANAL SATIŞ: {symbol}\n"
-                    f"Çıkış: {price_money(price)}\n"
-                    f"Net sonuç: {money(trade['pnl'])}\n"
-                    f"Getiri: %{trade['pnl_percent']:.2f}\n"
-                    f"Neden: {reason}"
-                )
-
-    # Yeni alim adaylarini sirala.
-    ranked = sorted(
-        market.items(),
-        key=lambda item: (
-            item[1]["daily"]["buy"]
-            + item[1]["weekly"]["buy"]
-        ),
-        reverse=True
-    )
-
-    for symbol, item in ranked:
-
-        if len(state["positions"]) >= MAX_POSITIONS:
-            break
-
-        if symbol in state["positions"]:
-            continue
-
-        if not item["buy_alert"]:
-            continue
-
-        if (
-            symbol.endswith("USDT")
-            and symbol[:-4] in STABLECOINS
-        ):
-            continue
-
-        if state["cash"] < 5:
-            break
-
-        allocation = min(
-            state["cash"],
-            STARTING_BALANCE * TRADE_ALLOCATION
-        )
-
-        price = item["price"]
-        average_atr = item["atr"]
-
-        if price <= 0 or average_atr <= 0:
-            continue
-
-        quantity = (
-            allocation / (price * (1 + FEE))
-        )
-
-        stop = max(
-            price - average_atr * STOP_ATR,
-            price * 0.90
-        )
-
-        target = (
-            price + average_atr * TARGET_ATR
-        )
-
-        state["cash"] -= allocation
-
-        state["positions"][symbol] = {
-            "entry": price,
-            "last_price": price,
-            "peak_price": price,
-            "quantity": quantity,
-            "cost": allocation,
-            "stop": stop,
-            "initial_stop": stop,
-            "stop_mode": "INITIAL",
-            "target": target,
-            "opened": stamp()
+def load_state():
+    if not os.path.exists(STATE_FILE):
+        state = new_state()
+        save_state(state)
+        return state
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as file:
+            state = json.load(file)
+        required = {
+            "status", "started", "deadline", "cash", "positions",
+            "trades", "cooldowns", "daily_date", "daily_start_equity",
+            "last_report", "scan_count"
         }
+        if not required.issubset(state):
+            raise ValueError("Durum dosyasinda gerekli alanlar eksik")
+        if state["status"] == "completed":
+            # Tamamlanan testi kendiliginden sifirlamaz.
+            return state
+        return state
+    except Exception as exc:
+        telegram(f"UYARI: Portfoy dosyasi okunamadi: {exc}. Yeni sanal test baslatiliyor.")
+        state = new_state()
+        save_state(state)
+        return state
 
-        events.append(
-            f"🟢 SANAL ALIM: {symbol}\n"
-            f"Alış: {price_money(price)}\n"
-            f"Yatırılan: {money(allocation)}\n"
-            f"Günlük AL: %{item['daily']['buy']}\n"
-            f"Haftalık AL: %{item['weekly']['buy']}\n"
-            f"Stop: {price_money(stop)}\n"
-            f"Hedef: {price_money(target)}"
-        )
 
-    return events
-
-
-# ============================================================
-# PORTFOY DEGERI
-# ============================================================
-
-def portfolio_value(state, market):
-
-    total = state["cash"]
-
-    for symbol, position in state["positions"].items():
-
-        price = market.get(symbol, {}).get(
-            "price",
-            position.get(
-                "last_price",
-                position["entry"]
-            )
-        )
-
-        # Tahmini satis komisyonu dahil net tasfiye degeri.
-        total += (
-            position["quantity"]
-            * price
-            * (1 - FEE)
-        )
-
+def equity(state, market):
+    total = float(state["cash"])
+    for symbol, pos in state["positions"].items():
+        price = market.get(symbol, {}).get("price", pos["last_price"])
+        total += pos["quantity"] * price * (1 - FEE_RATE)
     return total
 
 
-# ============================================================
-# ALIM BILDIRIMLERI
-# ============================================================
+def daily_loss_limit_reached(state, market):
+    today = now().date().isoformat()
+    if state["daily_date"] != today:
+        state["daily_date"] = today
+        state["daily_start_equity"] = equity(state, market)
+    start = float(state["daily_start_equity"])
+    if start <= 0:
+        return True
+    return (start - equity(state, market)) / start >= MAX_DAILY_LOSS
 
-def send_buy_alerts(state, market):
 
-    sent = 0
-    current = now()
+def close_position(state, symbol, price, reason):
+    pos = state["positions"].get(symbol)
+    if not pos:
+        return None
+    proceeds = pos["quantity"] * price * (1 - FEE_RATE)
+    pnl = proceeds - pos["cost"]
+    state["cash"] += proceeds
+    del state["positions"][symbol]
+    state["cooldowns"][symbol] = (
+        now() + timedelta(hours=REENTRY_WAIT_HOURS)
+    ).isoformat()
+    trade = {
+        "symbol": symbol,
+        "entry": pos["entry"],
+        "exit": price,
+        "quantity": pos["quantity"],
+        "cost": pos["cost"],
+        "pnl": pnl,
+        "pnl_percent": 100 * pnl / pos["cost"] if pos["cost"] else 0,
+        "reason": reason,
+        "closed": iso_now()
+    }
+    state["trades"].append(trade)
+    return trade
 
-    for symbol, item in market.items():
 
-        if not item["buy_alert"]:
+def manage_positions(state, market):
+    messages = []
+    for symbol in list(state["positions"]):
+        item = market.get(symbol)
+        if not item:
+            continue
+        pos = state["positions"][symbol]
+        price = item["price"]
+        pos["last_price"] = price
+        pos["peak_price"] = max(pos["peak_price"], price)
+        gain = price / pos["entry"] - 1
+
+        if gain >= BREAK_EVEN_ACTIVATION:
+            fee_entry = pos["entry"] * (1 + 2 * FEE_RATE)
+            pos["stop"] = max(pos["stop"], fee_entry)
+        if gain >= TRAILING_ACTIVATION:
+            trail = pos["peak_price"] * (1 - TRAILING_DISTANCE)
+            pos["stop"] = max(pos["stop"], trail)
+
+        reason = None
+        if price <= pos["stop"]:
+            reason = "IZ SUREN STOP" if gain >= TRAILING_ACTIVATION else "STOP"
+        elif price >= pos["target"]:
+            reason = "HEDEF"
+        elif item["sell_signal"]:
+            reason = "SAT SINYALI"
+
+        if reason:
+            trade = close_position(state, symbol, price, reason)
+            if trade:
+                messages.append(
+                    f"SANAL SATIS: {symbol}\n"
+                    f"Cikis: {price:.8f} TL\n"
+                    f"Net K/Z: {trade['pnl']:+.2f} TL "
+                    f"(%{trade['pnl_percent']:+.2f})\nNeden: {reason}"
+                )
+    return messages
+
+
+def open_positions(state, market):
+    messages = []
+    if daily_loss_limit_reached(state, market):
+        return messages
+
+    candidates = sorted(
+        market.items(),
+        key=lambda x: x[1]["daily"]["buy_score"] + x[1]["weekly"]["buy_score"],
+        reverse=True
+    )
+    for symbol, item in candidates:
+        if len(state["positions"]) >= MAX_POSITIONS:
+            break
+        if symbol in state["positions"] or not item["buy_signal"]:
             continue
 
-        key = symbol + "_AL"
-
-        previous = state["last_alerts"].get(key)
-
-        if previous:
-
+        cooldown = state["cooldowns"].get(symbol)
+        if cooldown:
             try:
-
-                if (
-                    current - datetime.fromisoformat(previous)
-                    < timedelta(hours=6)
-                ):
+                if now() < datetime.fromisoformat(cooldown):
                     continue
+            except (TypeError, ValueError):
+                state["cooldowns"].pop(symbol, None)
 
-            except ValueError:
-                pass
+        price, atr_value = item["price"], item["atr"]
+        stop_distance = ATR_STOP_MULTIPLIER * atr_value
+        stop = price - stop_distance
+        target = price + ATR_TARGET_MULTIPLIER * atr_value
+        if price <= 0 or stop <= 0 or stop_distance <= 0:
+            continue
 
-        message = (
-            f"🟢 GÜÇLÜ AL ADAYI: {symbol}\n"
-            f"Günlük AL: %{item['daily']['buy']}\n"
-            f"Haftalık AL: %{item['weekly']['buy']}\n"
-            f"Fiyat: {price_money(item['price'])}\n"
-            f"RSI: {item['daily']['rsi']:.1f}\n"
-            f"Hacim oranı: {item['daily']['volume_ratio']:.2f}\n"
-            "Bu puan kazanç garantisi veya olasılığı değildir. "
-            "Yalnızca sanal test sinyalidir."
+        current_equity = equity(state, market)
+        risk_budget = current_equity * RISK_PER_TRADE
+        # Pozisyon tutari, stop seviyesine kadar yaklasik %1 portfoy riski hedefler.
+        risk_value = risk_budget * price / stop_distance
+        allocation = min(
+            MAX_TRADE_VALUE,
+            risk_value,
+            state["cash"] / (1 + FEE_RATE)
         )
+        if allocation < 1.0:
+            continue
 
-        if telegram(message):
+        quantity = allocation / (price * (1 + FEE_RATE))
+        cost = quantity * price * (1 + FEE_RATE)
+        state["cash"] -= cost
+        state["positions"][symbol] = {
+            "entry": price,
+            "quantity": quantity,
+            "cost": cost,
+            "stop": stop,
+            "target": target,
+            "peak_price": price,
+            "last_price": price,
+            "opened": iso_now()
+        }
+        messages.append(
+            f"SANAL ALIM: {symbol}\n"
+            f"Alis: {price:.8f} TL | Tutar: {cost:.2f} TL\n"
+            f"Gunluk/haftalik puan: "
+            f"{item['daily']['buy_score']}/{item['weekly']['buy_score']}\n"
+            f"RSI: {item['daily']['rsi']:.1f} | "
+            f"Hacim: {item['daily']['volume_ratio']:.2f}x\n"
+            f"Stop: {stop:.8f} TL | Hedef: {target:.8f} TL"
+        )
+    return messages
 
-            state["last_alerts"][key] = stamp()
-            sent += 1
 
-    return sent
+def scan():
+    symbols, prices = get_symbols()
+    usdt_try = get_usdt_try_rate()
+    market = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        futures = {
+            pool.submit(evaluate_symbol, s, prices[s], usdt_try): s
+            for s in symbols if s in prices
+        }
+        for future in concurrent.futures.as_completed(futures):
+            symbol = futures[future]
+            try:
+                result = future.result()
+                if result:
+                    market[symbol] = result
+            except Exception as exc:
+                print(f"{symbol} gorev hatasi: {exc}")
+    return symbols, market
 
 
-# ============================================================
-# 24 SAATLIK TESTI BITIR
-# ============================================================
+def report(state, symbols, market):
+    value = equity(state, market)
+    trades = state["trades"]
+    wins = sum(t["pnl"] > 0 for t in trades)
+    losses = sum(t["pnl"] < 0 for t in trades)
+    rate = 100 * wins / len(trades) if trades else 0
+    daily = sum(x["daily"]["buy_score"] >= BUY_SCORE_MIN for x in market.values())
+    weekly = sum(x["weekly"]["buy_score"] >= BUY_SCORE_MIN for x in market.values())
+    combined = sum(x["buy_signal"] for x in market.values())
+    return (
+        "MASA TARAYICI 5.0 RAPORU\n"
+        f"Saat: {now().strftime('%Y-%m-%d %H:%M UTC')}\n"
+        f"Taranan: {len(symbols)} | Analiz edilen: {len(market)}\n"
+        f"Gunluk AL adayi: {daily} | Haftalik AL adayi: {weekly}\n"
+        f"Birlesik AL sinyali: {combined}\n"
+        f"Sanal nakit: {state['cash']:.2f} TL\n"
+        f"Portfoy: {value:.2f} TL | Toplam K/Z: {value-STARTING_BALANCE:+.2f} TL\n"
+        f"Kapanan islem: {len(trades)} | Kazanan: {wins} | Kaybeden: {losses}\n"
+        f"Kazanma orani: %{rate:.1f} | Acik pozisyon: {len(state['positions'])}\n"
+        "GERCEK EMIR: KAPALI"
+    )
+
 
 def finish_test(state, market):
-
-    # Acik pozisyonlari son bilinen fiyatla kapat.
+    messages = []
     for symbol in list(state["positions"]):
-
-        position = state["positions"][symbol]
-
         price = market.get(symbol, {}).get(
-            "price",
-            position.get(
-                "last_price",
-                position.get("entry", 0)
-            )
+            "price", state["positions"][symbol]["last_price"]
         )
-
-        trade = close_position(
-            state,
-            symbol,
-            price,
-            "24 SAAT SONU"
-        )
-
+        trade = close_position(state, symbol, price, "24 SAATLIK TEST SONU")
         if trade:
-
-            telegram(
-                f"🏁 TEST SONU SANAL SATIŞ: {symbol}\n"
-                f"Çıkış: {price_money(price)}\n"
-                f"Net sonuç: {money(trade['pnl'])}\n"
-                f"Getiri: %{trade['pnl_percent']:.2f}"
+            messages.append(
+                f"TEST SONU SANAL SATIS: {symbol}\n"
+                f"Net K/Z: {trade['pnl']:+.2f} TL"
             )
-
-    equity = state["cash"]
-
-    realized = sum(
-        trade["pnl"]
-        for trade in state["trades"]
+    state["status"] = "completed"
+    final_value = state["cash"]
+    trades = state["trades"]
+    wins = sum(t["pnl"] > 0 for t in trades)
+    messages.append(
+        "24 SAATLIK SANAL TEST TAMAMLANDI\n"
+        f"Baslangic: {STARTING_BALANCE:.2f} TL\n"
+        f"Son portfoy: {final_value:.2f} TL\n"
+        f"Toplam K/Z: {final_value-STARTING_BALANCE:+.2f} TL\n"
+        f"Islem: {len(trades)} | Kazanan: {wins} | "
+        f"Kaybeden: {len(trades)-wins}\n"
+        "Tum pozisyonlar sanal kapatildi. Gercek emir yok."
     )
+    return messages
 
-    pnl = equity - STARTING_BALANCE
-
-    wins = sum(
-        trade["pnl"] > 0
-        for trade in state["trades"]
-    )
-
-    losses = sum(
-        trade["pnl"] < 0
-        for trade in state["trades"]
-    )
-
-    count = len(state["trades"])
-
-    rate = (
-        wins / count * 100
-        if count else 0
-    )
-
-    state.update({
-        "status": "completed",
-        "completed": stamp(),
-        "ending_equity": equity,
-        "total_pnl": pnl,
-        "realized_pnl": realized,
-        "open_positions_at_finish": 0
-    })
-
-    message = (
-        "🏁 24 SAATLİK SANAL TEST TAMAMLANDI\n\n"
-        f"Başlangıç: {money(STARTING_BALANCE)}\n"
-        f"Son portföy: {money(equity)}\n"
-        f"Toplam K/Z: {money(pnl)}\n"
-        f"Gerçekleşmiş K/Z: {money(realized)}\n"
-        f"Kapanan işlem: {count}\n"
-        f"Kazanan: {wins}\n"
-        f"Kaybeden: {losses}\n"
-        f"Kazanma oranı: %{rate:.1f}\n"
-        "Açık pozisyon: 0\n"
-        "Test sonunda bütün pozisyonlar sanal kapatıldı.\n"
-        "Gerçek emir gönderilmedi."
-    )
-
-    save_state(state)
-
-    telegram(message)
-
-    print(message)
-
-
-# ============================================================
-# ANA TARAMA
-# ============================================================
 
 def main():
-
-    print("Tarama başladı:", stamp())
-
-    if not TOKEN or not CHAT_ID:
-
-        raise RuntimeError(
-            "GitHub Secrets içinde TELEGRAM_BOT_TOKEN "
-            "ve TELEGRAM_CHAT_ID tanımlı olmalı."
-        )
-
     state = load_state()
-
-    if state["status"] == "completed":
-
-        state = new_state(
-            state.get("history", [])
-        )
-
-    # Başlangıç bildirimi yalnızca Telegram'a başarıyla
-    # gönderildikten sonra tamamlandı olarak kaydedilir.
-    if not state.get("startup_notification_sent", False):
-
-        startup_message = (
-            "🧪 24 SAATLİK SANAL TEST BAŞLADI\\n"
-            "Başlangıç: 100 TL\\n"
-            "Binance Spot taraması aktif.\\n"
-            "Gerçek para ve gerçek emir kullanılmıyor."
-        )
-
-        if telegram(startup_message):
-
-            state["startup_notification_sent"] = True
-            save_state(state)
-
-            print("STARTUP_NOTIFICATION_SENT")
-
-        else:
-
-            print("STARTUP_NOTIFICATION_PENDING")
-
-    held = list(state["positions"])
-
-    symbols, prices = market_data(held)
-
-    usdttry = prices.get("USDTTRY")
-
-    print("Taranacak parite:", len(symbols))
-
-    candles = {}
-    errors = []
-
-    with ThreadPoolExecutor(
-        max_workers=MAX_WORKERS
-    ) as pool:
-
-        futures = {
-            pool.submit(candles_for, symbol): symbol
-            for symbol in symbols
-        }
-
-        for future in as_completed(futures):
-
-            symbol = futures[future]
-
-            try:
-
-                key, rows = future.result()
-                candles[key] = rows
-
-            except Exception as exc:
-
-                errors.append(
-                    f"{symbol}: {exc}"
-                )
-
-    market = {}
-
-    for symbol in symbols:
-
-        if symbol.endswith("USDT"):
-
-            if not usdttry:
-                continue
-
-            conversion = usdttry
-
-        else:
-            conversion = 1.0
-
-        item = evaluate(
-            symbol,
-            candles.get(symbol, []),
-            prices.get(symbol),
-            conversion
-        )
-
-        if item:
-            market[symbol] = item
-
-    daily = sum(
-        item["daily"]["decision"] == "AL"
-        for item in market.values()
-    )
-
-    weekly = sum(
-        item["weekly"]["decision"] == "AL"
-        for item in market.values()
-    )
-
-    strong = sum(
-        item["buy_alert"]
-        for item in market.values()
-    )
-
-    # Acik pozisyonlari ve yeni alislari kontrol et.
-    events = update_paper(state, market)
-
-    for event in events:
-        telegram(event)
-
-    sent = send_buy_alerts(state, market)
-
-    state["scan_count"] = (
-        state.get("scan_count", 0) + 1
-    )
-
-    state["last_scan"] = stamp()
-
-    deadline = datetime.fromisoformat(
-        state["deadline"]
-    )
-
-    equity = portfolio_value(
-        state,
-        market
-    )
-
-    heartbeat_due = True
-
-    if state.get("last_heartbeat"):
-
-        try:
-
-            heartbeat_due = (
-                now()
-                - datetime.fromisoformat(
-                    state["last_heartbeat"]
-                )
-                >= timedelta(hours=HEARTBEAT_HOURS)
-            )
-
-        except ValueError:
-            pass
-
-    if heartbeat_due:
-
-        status = (
-            "📊 TARAMA RAPORU\n"
-            f"Saat: {now().strftime('%Y-%m-%d %H:%M UTC')}\n"
-            f"Taranan: {len(symbols)} parite\n"
-            f"Analiz edilen: {len(market)}\n"
-            f"Günlük AL: {daily}\n"
-            f"Haftalık AL: {weekly}\n"
-            f"Güçlü AL: {strong}\n"
-            f"Gönderilen AL bildirimi: {sent}\n"
-            f"Sanal nakit: {money(state['cash'])}\n"
-            f"Portföy: {money(equity)}\n"
-            f"Açık pozisyon: {len(state['positions'])}\n"
-            f"Durum: "
-            f"{'Sinyal yok, tarama çalışıyor.' if strong == 0 else 'Sinyal bulundu.'}"
-        )
-
-        if errors:
-            status += (
-                f"\nVeri alınamayan parite: {len(errors)}"
-            )
-
-        if telegram(status):
-            state["last_heartbeat"] = stamp()
-
-    if errors:
-
-        print(
-            "Eksik veri sayısı:",
-            len(errors),
-            "İlk hata:",
-            errors[0]
-        )
-
-    # Test suresi dolduysa tum pozisyonlari kapat.
-    if now() >= deadline:
-
-        finish_test(state, market)
-
-    else:
-
-        save_state(state)
-
-    print(
-        "Tarama tamamlandı.",
-        "scan_count=", state["scan_count"],
-        "market=", len(market),
-        "alerts=", sent
-    )
-
-
-# ============================================================
-# HATA YONETIMI
-# ============================================================
-
-if __name__ == "__main__":
+    if state.get("status") == "completed":
+        print("24 saatlik test zaten tamamlanmis. Yeni test icin paper_state.json dosyasini sil.")
+        return
 
     try:
+        symbols, market = scan()
+        state["scan_count"] = int(state.get("scan_count", 0)) + 1
 
-        main()
+        # Test suresi dolduysa yeni pozisyon acmadan once mevcutlari kapat.
+        if now() >= datetime.fromisoformat(state["deadline"]):
+            for message in finish_test(state, market):
+                telegram(message)
+            save_state(state)
+            return
+
+        for message in manage_positions(state, market):
+            telegram(message)
+        for message in open_positions(state, market):
+            telegram(message)
+
+        text_report = report(state, symbols, market)
+        last_report = datetime.fromisoformat(state["last_report"])
+        if now() - last_report >= timedelta(seconds=REPORT_INTERVAL_SECONDS):
+            telegram(text_report)
+            state["last_report"] = iso_now()
+        print(text_report)
+        save_state(state)
 
     except Exception as exc:
-
-        detail = (
-            "🚨 KRİPTO BOT HATASI\n"
-            f"{type(exc).__name__}: {exc}"
-        )
-
-        print(detail)
-
-        traceback.print_exc()
-
-        if TOKEN and CHAT_ID:
-            telegram(detail)
-
+        # Mevcut durum korunur; hata loga ve Telegram'a yazilir.
+        message = f"MASA TARAYICI HATASI\n{type(exc).__name__}: {exc}"
+        print(message)
+        telegram(message)
         raise
+
+
+if __name__ == "__main__":
+    main()
+
+
+==============================================================================
+GITHUB ACTIONS DOSYASI: .github/workflows/masa-tarayici.yml
+==============================================================================
+
+# .github/workflows/masa-tarayici.yml
+# Bu workflow paper_state.json dosyasini Git deposuna geri kaydeder.
+# GitHub Settings > Secrets and variables > Actions:
+# TELEGRAM_BOT_TOKEN ve TELEGRAM_CHAT_ID secret'larini ekle.
+# Actions icin Settings > Actions > General > Workflow permissions:
+# "Read and write permissions" secili olmali.
+
+name: Masa Tarayici
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/5 * * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: masa-tarayici
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Depoyu indir
+        uses: actions/checkout@v4
+
+      - name: Python kur
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Tarayiciyi calistir
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python scanner.py
+
+      - name: Sanal portfoy durumunu kaydet
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add paper_state.json
+          git diff --cached --quiet || git commit -m "Update paper trading state"
+          git push
