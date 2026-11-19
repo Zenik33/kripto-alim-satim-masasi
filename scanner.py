@@ -597,53 +597,6 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-==============================================================================
-GITHUB ACTIONS DOSYASI: .github/workflows/masa-tarayici.yml
-==============================================================================
-
-# .github/workflows/masa-tarayici.yml
-# Bu workflow paper_state.json dosyasini Git deposuna geri kaydeder.
-# GitHub Settings > Secrets and variables > Actions:
-# TELEGRAM_BOT_TOKEN ve TELEGRAM_CHAT_ID secret'larini ekle.
-# Actions icin Settings > Actions > General > Workflow permissions:
-# "Read and write permissions" secili olmali.
-
-name: Masa Tarayici
-
-on:
-  workflow_dispatch:
-  schedule:
-    - cron: "*/5 * * * *"
-
-permissions:
-  contents: write
-
-concurrency:
-  group: masa-tarayici
-  cancel-in-progress: false
-
-jobs:
-  scan:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Depoyu indir
-        uses: actions/checkout@v4
-
-      - name: Python kur
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Tarayiciyi calistir
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python scanner.py
-
-      - name: Sanal portfoy durumunu kaydet
-        run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add paper_state.json
