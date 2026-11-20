@@ -1,25 +1,28 @@
 {
   "version": 5.1,
-  "status": "running",
+  "status": "completed",
   "started": "2026-11-19T09:57:17.108801+00:00",
   "deadline": "2026-11-20T09:57:17.108801+00:00",
-  "cash": 96.93933054393305,
-  "positions": {
-    "SHELLTRY": {
+  "cash": 100.0961904204582,
+  "positions": {},
+  "trades": [
+    {
+      "symbol": "SHELLTRY",
       "entry": 1.254,
+      "exit": 1.296,
       "quantity": 2.438286957115409,
       "cost": 3.0606694560669454,
-      "stop": 1.256508,
-      "target": 1.9368571428571428,
-      "peak_price": 1.305,
-      "last_price": 1.305,
-      "opened": "2026-11-19T10:08:23.652476+00:00"
+      "pnl": 0.09619042045820292,
+      "pnl_percent": 3.1427902241299384,
+      "reason": "24 SAATLIK TEST SONU",
+      "closed": "2026-11-20T10:43:07.616868+00:00"
     }
+  ],
+  "cooldowns": {
+    "SHELLTRY": "2026-11-20T16:43:07.616855+00:00"
   },
-  "trades": [],
-  "cooldowns": {},
   "daily_date": "2026-11-20",
   "daily_start_equity": 100.01093571700267,
   "last_report": "2026-11-20T09:33:46.917317+00:00",
-  "scan_count": 24
+  "scan_count": 25
 }
