@@ -18,8 +18,8 @@
   },
   "trades": [],
   "cooldowns": {},
-  "daily_date": "2026-11-19",
-  "daily_start_equity": 100.0,
+  "daily_date": "2026-11-20",
+  "daily_start_equity": 100.01093571700267,
   "last_report": "2026-11-19T22:45:06.122398+00:00",
-  "scan_count": 14
+  "scan_count": 15
 }
